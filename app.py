@@ -5,9 +5,9 @@ import math
 import io
 
 # --- Page Configuration ---
-st.set_page_config(page_title="Tally Ledger Segregator", layout="centered", page_icon="📊")
-st.title("📊 Tally Stock Ledger Segregator")
-st.markdown("Upload your Master Sheet and your raw Tally exports to automatically calculate and update the ledger based on your custom rules.")
+st.set_page_config(page_title="Tally Ledger Updater", layout="centered", page_icon="📊")
+st.title("📊 Tally Stock Ledger Updater")
+st.markdown("Upload your Master Sheet and your raw Tally exports to automatically calculate and update the ledger based on the **original summary rules**.")
 
 def clean_val(val):
     """Helper function to clean and convert string numbers to floats."""
@@ -28,7 +28,7 @@ if st.button("Process & Generate Updated Ledger"):
     if not master_file or not tally_files:
         st.error("⚠️ Please upload both the master sheet and at least one Tally file.")
     else:
-        with st.spinner("Processing files and applying rules..."):
+        with st.spinner("Processing files and extracting data..."):
             metrics_dict = {}
             
             # --- Step 1: Parse Raw Tally Files ---
@@ -57,83 +57,34 @@ if st.button("Process & Generate Updated Ledger"):
                                 current_item = val1
                                 if current_item not in metrics_dict:
                                     metrics_dict[current_item] = {
-                                        'sale_out': 0.0, 'credit_note_in': 0.0,
-                                        'debit_note_in': 0.0, 'debit_note_out': 0.0,
-                                        'wh_in': 0.0, 'wh_out': 0.0,
-                                        'sj_conv_in': 0.0, 'sj_conv_out': 0.0,
-                                        'sj_other_in': 0.0, 'sj_other_out': 0.0,
-                                        'purchase_in': 0.0
+                                        'inward_production': 0.0,
+                                        'inward_purchase': 0.0,
+                                        'outward_consumption': 0.0,
+                                        'outward_sales': 0.0,
+                                        'godown_transfer': 0.0
                                     }
                                 continue
                         
-                        # Aggregate quantities by Voucher Type
+                        # Aggregate quantities by original clean rules
                         if current_item and vch_type:
                             in_qty = clean_val(row.iloc[4])
                             out_qty = clean_val(row.iloc[7])
                             
-                            # Sales and Credit Notes
+                            if 'conversion' in vch_type and in_qty > 0:
+                                metrics_dict[current_item]['inward_production'] += in_qty
+                            if 'purchase' in vch_type and in_qty > 0:
+                                metrics_dict[current_item]['inward_purchase'] += in_qty
+                            if 'conversion' in vch_type and out_qty > 0:
+                                metrics_dict[current_item]['outward_consumption'] += out_qty
                             if 'sale' in vch_type and out_qty > 0:
-                                metrics_dict[current_item]['sale_out'] += out_qty
-                            if 'credit note' in vch_type and in_qty > 0:
-                                metrics_dict[current_item]['credit_note_in'] += in_qty
-                                
-                            # Debit Notes
-                            if 'debit note' in vch_type:
-                                if in_qty > 0: metrics_dict[current_item]['debit_note_in'] += in_qty
-                                if out_qty > 0: metrics_dict[current_item]['debit_note_out'] += out_qty
-                                    
-                            # Warehouse Transfers
-                            if 'warehouse' in vch_type or 'transfer' in vch_type:
-                                if in_qty > 0: metrics_dict[current_item]['wh_in'] += in_qty
-                                if out_qty > 0: metrics_dict[current_item]['wh_out'] += out_qty
-                                    
-                            # Stock Journal Conversion
-                            elif 'conversion' in vch_type:
-                                if in_qty > 0: metrics_dict[current_item]['sj_conv_in'] += in_qty
-                                if out_qty > 0: metrics_dict[current_item]['sj_conv_out'] += out_qty
-                                    
-                            # Other Stock Journals
-                            elif 'stock journal' in vch_type:
-                                if in_qty > 0: metrics_dict[current_item]['sj_other_in'] += in_qty
-                                if out_qty > 0: metrics_dict[current_item]['sj_other_out'] += out_qty
-                                    
-                            # Purchases
-                            if 'purchase' in vch_type and 'debit note' not in vch_type and in_qty > 0:
-                                metrics_dict[current_item]['purchase_in'] += in_qty
+                                metrics_dict[current_item]['outward_sales'] += out_qty
+                            if ('warehouse' in vch_type or 'transfer' in vch_type) and in_qty > 0:
+                                metrics_dict[current_item]['godown_transfer'] += in_qty
                                 
                 except Exception as e:
                     st.warning(f"Could not process {f.name}: {e}")
 
-            # --- Step 2: Apply Custom Rules ---
-            final_metrics = {}
-            for item, d in metrics_dict.items():
-                # Rule 1: Net Sale Qty (Outward Sales - Credit Notes)
-                net_sale = d['sale_out'] - d['credit_note_in']
-                
-                # Rule 2: Warehouse trf in and out difference
-                wh_in = d['wh_in']
-                wh_out = d['wh_out']
-                wh_diff = wh_in - wh_out
-                godown_transfer = wh_in 
-                
-                # Rule 3: SJ net calculation
-                total_in = d['sj_conv_in'] + d['sj_other_in'] + wh_diff + d['debit_note_in']
-                total_out = d['sj_conv_out'] + d['sj_other_out'] + d['debit_note_out']
-                
-                net_prod = total_in - total_out
-                
-                inward_prod = net_prod if net_prod > 0 else 0.0
-                outward_cons = abs(net_prod) if net_prod < 0 else 0.0
-                
-                final_metrics[item] = {
-                    'net_sale': net_sale if net_sale > 0 else 0.0,
-                    'godown_transfer': godown_transfer if godown_transfer > 0 else 0.0,
-                    'inward_prod': inward_prod,
-                    'outward_cons': outward_cons,
-                    'inward_purchase': d['purchase_in']
-                }
-
-            # --- Step 3: Update Master Sheet ---
+            # --- Step 2: Update Master Sheet ---
             master_file.seek(0)
             wb = openpyxl.load_workbook(master_file)
             ws = wb.active
@@ -144,32 +95,28 @@ if st.button("Process & Generate Updated Ledger"):
                 cell_val = ws.cell(row=row, column=1).value
                 if cell_val and isinstance(cell_val, str):
                     item_name = cell_val.strip()
-                    if item_name in final_metrics:
-                        m = final_metrics[item_name]
+                    if item_name in metrics_dict:
+                        m = metrics_dict[item_name]
                         
-                        # Clear existing target columns to overwrite cleanly
-                        for col in [18, 19, 20, 21, 24]: # R, S, T, U, X
-                            ws.cell(row=row, column=col).value = None
-                            
-                        # Write calculated values
-                        if m['inward_prod'] > 0: ws.cell(row=row, column=18).value = m['inward_prod']
+                        # Write calculated values if they are greater than 0
+                        if m['inward_production'] > 0: ws.cell(row=row, column=18).value = m['inward_production']
                         if m['inward_purchase'] > 0: ws.cell(row=row, column=19).value = m['inward_purchase']
-                        if m['outward_cons'] > 0: ws.cell(row=row, column=20).value = m['outward_cons']
-                        if m['net_sale'] > 0: ws.cell(row=row, column=21).value = m['net_sale']
+                        if m['outward_consumption'] > 0: ws.cell(row=row, column=20).value = m['outward_consumption']
+                        if m['outward_sales'] > 0: ws.cell(row=row, column=21).value = m['outward_sales']
                         if m['godown_transfer'] > 0: ws.cell(row=row, column=24).value = m['godown_transfer']
                             
                         updates += 1
 
-            # --- Step 4: Output for Download ---
+            # --- Step 3: Output for Download ---
             output = io.BytesIO()
             wb.save(output)
             output.seek(0)
             
-            st.success(f"✅ Successfully processed {len(tally_files)} files and updated {updates} items in the master sheet!")
+            st.success(f"✅ Successfully processed files and updated {updates} items in the master sheet!")
             
             st.download_button(
-                label="📥 Download Segregated Ledger",
+                label="📥 Download Final Ledger",
                 data=output,
-                file_name="Segregated_Summary_Ledger.xlsx",
+                file_name="final_StkSum_Complete.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
