@@ -1,122 +1,115 @@
 import streamlit as st
 import pandas as pd
 import openpyxl
-import math
 import io
 
 # --- Page Configuration ---
-st.set_page_config(page_title="Tally Ledger Updater", layout="centered", page_icon="📊")
-st.title("📊 Tally Stock Ledger Updater")
-st.markdown("Upload your Master Sheet and your raw Tally exports to automatically calculate and update the ledger based on the **original summary rules**.")
-
-def clean_val(val):
-    """Helper function to clean and convert string numbers to floats."""
-    try:
-        if pd.isna(val): return 0.0
-        v = float(str(val).replace(',', '').strip())
-        return v if not math.isnan(v) else 0.0
-    except:
-        return 0.0
+st.set_page_config(page_title="Tally VLOOKUP Updater", layout="centered", page_icon="🔗")
+st.title("🔗 Master Ledger VLOOKUP Updater")
+st.markdown("Upload your **Master Sheet** and your **Segregated Summary Sheet**. This app will match the item names and automatically VLOOKUP the calculated totals into your master sheet.")
 
 # --- File Uploaders ---
 st.subheader("1. Upload Files")
 master_file = st.file_uploader("Upload Master Sheet (e.g., final_StkSum.xlsx)", type=['xlsx'])
-tally_files = st.file_uploader("Upload Raw Tally Files (.xls or .xlsx)", type=['xls', 'xlsx'], accept_multiple_files=True)
+summary_file = st.file_uploader("Upload Segregated Summary Sheet (.xlsx)", type=['xlsx'])
 
 # --- Process Button ---
-if st.button("Process & Generate Updated Ledger"):
-    if not master_file or not tally_files:
-        st.error("⚠️ Please upload both the master sheet and at least one Tally file.")
+if st.button("Run VLOOKUP & Update Master"):
+    if not master_file or not summary_file:
+        st.error("⚠️ Please upload both the Master Sheet and the Summary Sheet.")
     else:
-        with st.spinner("Processing files and extracting data..."):
-            metrics_dict = {}
-            
-            # --- Step 1: Parse Raw Tally Files ---
-            for f in tally_files:
-                try:
-                    # Handle both standard Excel and Tally's HTML-based .xls files
-                    if f.name.endswith('.xls'):
-                        try:
-                            df = pd.read_excel(f, engine='openpyxl')
-                        except:
-                            f.seek(0)
-                            df = pd.read_html(f.read().decode('utf-8'))[0]
-                    else:
-                        df = pd.read_excel(f)
-                        
-                    current_item = None
+        with st.spinner("Running VLOOKUP mapping..."):
+            try:
+                # 1. Read the Summary File into a pandas DataFrame
+                df_summary = pd.read_excel(summary_file)
+                
+                # Make sure the summary file has the expected columns. 
+                # We assume the first column is 'Item Name' or similar.
+                # We will create a dictionary for fast VLOOKUP mapping.
+                item_col = df_summary.columns[0]
+                
+                # Convert summary data into a dictionary for VLOOKUP
+                # Adjust column names based on your actual summary file headers
+                # We are looking for columns that contain these keywords:
+                summary_data = {}
+                for idx, row in df_summary.iterrows():
+                    item_name = str(row[item_col]).strip()
                     
-                    for idx, row in df.iterrows():
-                        col0, col1 = row.iloc[0], row.iloc[1]
-                        vch_type = str(row.iloc[2]).strip().lower() if pd.notna(row.iloc[2]) else ''
+                    if pd.notna(item_name) and item_name != 'nan':
+                        # Default values
+                        prod, purch, cons, sales, godown = 0, 0, 0, 0, 0
                         
-                        # Identify item name
-                        if pd.isna(col0) and pd.notna(col1):
-                            val1 = str(col1).strip()
-                            if val1 and val1 not in ['Particulars', 'Quantity']:
-                                current_item = val1
-                                if current_item not in metrics_dict:
-                                    metrics_dict[current_item] = {
-                                        'inward_production': 0.0,
-                                        'inward_purchase': 0.0,
-                                        'outward_consumption': 0.0,
-                                        'outward_sales': 0.0,
-                                        'godown_transfer': 0.0
-                                    }
-                                continue
-                        
-                        # Aggregate quantities by original clean rules
-                        if current_item and vch_type:
-                            in_qty = clean_val(row.iloc[4])
-                            out_qty = clean_val(row.iloc[7])
+                        # Flexibly find columns in the summary sheet
+                        for col_name in df_summary.columns:
+                            col_lower = str(col_name).lower()
+                            val = row[col_name]
+                            if pd.isna(val): val = 0
                             
-                            if 'conversion' in vch_type and in_qty > 0:
-                                metrics_dict[current_item]['inward_production'] += in_qty
-                            if 'purchase' in vch_type and in_qty > 0:
-                                metrics_dict[current_item]['inward_purchase'] += in_qty
-                            if 'conversion' in vch_type and out_qty > 0:
-                                metrics_dict[current_item]['outward_consumption'] += out_qty
-                            if 'sale' in vch_type and out_qty > 0:
-                                metrics_dict[current_item]['outward_sales'] += out_qty
-                            if ('warehouse' in vch_type or 'transfer' in vch_type) and in_qty > 0:
-                                metrics_dict[current_item]['godown_transfer'] += in_qty
+                            if 'production' in col_lower or 'prod' in col_lower:
+                                prod = val
+                            elif 'purchase' in col_lower:
+                                purch = val
+                            elif 'consumption' in col_lower or 'cons' in col_lower:
+                                cons = val
+                            elif 'sale' in col_lower:
+                                sales = val
+                            elif 'godown' in col_lower or 'transfer' in col_lower:
+                                godown = val
                                 
-                except Exception as e:
-                    st.warning(f"Could not process {f.name}: {e}")
+                        summary_data[item_name] = {
+                            'prod': prod,
+                            'purch': purch,
+                            'cons': cons,
+                            'sales': sales,
+                            'godown': godown
+                        }
 
-            # --- Step 2: Update Master Sheet ---
-            master_file.seek(0)
-            wb = openpyxl.load_workbook(master_file)
-            ws = wb.active
-            updates = 0
-            
-            # Start updating from row 12
-            for row in range(12, ws.max_row + 1):
-                cell_val = ws.cell(row=row, column=1).value
-                if cell_val and isinstance(cell_val, str):
-                    item_name = cell_val.strip()
-                    if item_name in metrics_dict:
-                        m = metrics_dict[item_name]
+                # 2. Open and Update the Master Sheet using openpyxl
+                master_file.seek(0)
+                wb = openpyxl.load_workbook(master_file)
+                ws = wb.active
+                
+                updates = 0
+                
+                # Start updating from row 12 (assuming rows 1-11 are headers/spares)
+                for row in range(12, ws.max_row + 1):
+                    cell_val = ws.cell(row=row, column=1).value
+                    
+                    if cell_val and isinstance(cell_val, str):
+                        master_item_name = cell_val.strip()
                         
-                        # Write calculated values if they are greater than 0
-                        if m['inward_production'] > 0: ws.cell(row=row, column=18).value = m['inward_production']
-                        if m['inward_purchase'] > 0: ws.cell(row=row, column=19).value = m['inward_purchase']
-                        if m['outward_consumption'] > 0: ws.cell(row=row, column=20).value = m['outward_consumption']
-                        if m['outward_sales'] > 0: ws.cell(row=row, column=21).value = m['outward_sales']
-                        if m['godown_transfer'] > 0: ws.cell(row=row, column=24).value = m['godown_transfer']
+                        # --- THE VLOOKUP LOGIC ---
+                        if master_item_name in summary_data:
+                            m = summary_data[master_item_name]
                             
-                        updates += 1
+                            # Clear existing data in target columns to prevent ghost data
+                            for col in [18, 19, 20, 21, 24]: # Columns R, S, T, U, X
+                                ws.cell(row=row, column=col).value = None
+                                
+                            # Write new VLOOKUP values if they are greater than 0
+                            if m['prod'] > 0: ws.cell(row=row, column=18).value = m['prod']
+                            if m['purch'] > 0: ws.cell(row=row, column=19).value = m['purch']
+                            if m['cons'] > 0: ws.cell(row=row, column=20).value = m['cons']
+                            if m['sales'] > 0: ws.cell(row=row, column=21).value = m['sales']
+                            if m['godown'] > 0: ws.cell(row=row, column=24).value = m['godown']
+                                
+                            updates += 1
 
-            # --- Step 3: Output for Download ---
-            output = io.BytesIO()
-            wb.save(output)
-            output.seek(0)
-            
-            st.success(f"✅ Successfully processed files and updated {updates} items in the master sheet!")
-            
-            st.download_button(
-                label="📥 Download Final Ledger",
-                data=output,
-                file_name="final_StkSum_Complete.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+                # 3. Save Output
+                output = io.BytesIO()
+                wb.save(output)
+                output.seek(0)
+                
+                st.success(f"✅ VLOOKUP Complete! Successfully mapped and updated {updates} items in the master sheet.")
+                
+                st.download_button(
+                    label="📥 Download VLOOKUP Master Sheet",
+                    data=output,
+                    file_name="Master_Sheet_VLOOKUP_Updated.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+                
+            except Exception as e:
+                st.error(f"An error occurred: {e}")
+                st.info("Make sure your Summary file has clear column headers like 'Inward Production', 'Outward Sales', etc.")
+                
